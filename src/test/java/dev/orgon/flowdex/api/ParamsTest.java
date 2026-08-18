@@ -81,4 +81,41 @@ class ParamsTest {
         assertThat(Params.limit(null)).isEqualTo(100);
         assertThatThrownBy(() -> Params.requireIp(null)).isInstanceOf(ApiException.class);
     }
+
+    /**
+     * 11+ digits exceeds 2^32-1, so this is not an IPv4 literal. Before the fix
+     * it fell through to a real ~4s DNS lookup.
+     */
+    @Test
+    void rejectsAnAllDigitStringLargeEnoughToReachTheResolver() {
+        assertThatThrownBy(() -> Params.requireIp(qs("ip", "11111111111")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("INVALID_IP"));
+    }
+
+    @Test
+    void screeningAnAllDigitStringDoesNotHitTheNetwork() {
+        long startNanos = System.nanoTime();
+        assertThatThrownBy(() -> Params.requireIp(qs("ip", "999999999999999999")))
+                .isInstanceOf(ApiException.class);
+        long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000;
+        assertThat(elapsedMillis).isLessThan(250);
+    }
+
+    @Test
+    void rejectsNonCanonicalIpv4Spellings() {
+        assertThatThrownBy(() -> Params.requireIp(qs("ip", "2130706433"))).isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> Params.requireIp(qs("ip", "010.0.0.5"))).isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> Params.requireIp(qs("ip", "10.0.0.5."))).isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> Params.requireIp(qs("ip", "10.0.0"))).isInstanceOf(ApiException.class);
+    }
+
+    @Test
+    void stillAcceptsOrdinaryAddresses() {
+        assertThat(Params.requireIp(qs("ip", "10.0.0.5"))).isEqualTo("10.0.0.5");
+        assertThat(Params.requireIp(qs("ip", "0.0.0.0"))).isEqualTo("0.0.0.0");
+        assertThat(Params.requireIp(qs("ip", "255.255.255.255"))).isEqualTo("255.255.255.255");
+        assertThat(Params.requireIp(qs("ip", "2001:db8::1"))).isEqualTo("2001:db8::1");
+        assertThat(Params.requireIp(qs("ip", "::1"))).isEqualTo("::1");
+    }
 }

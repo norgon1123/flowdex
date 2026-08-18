@@ -5,6 +5,7 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 import java.net.InetAddress;
 import java.time.Instant;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 public final class Params {
 
@@ -12,6 +13,23 @@ public final class Params {
 
     public static final int DEFAULT_LIMIT = 100;
     public static final int MAX_LIMIT = 1000;
+
+    /**
+     * Canonical dotted-quad only: each octet 0-255, no leading zeros.
+     *
+     * The value bound matters as much as the character set. Java parses an
+     * all-digit string below 2^32 as an unsigned-decimal IPv4 literal and sends
+     * anything larger to the resolver, so a character-class screen alone still
+     * lets a query parameter trigger a DNS lookup from inside the function.
+     * Matching the canonical form instead means getByName is never reached with
+     * an all-digit string.
+     *
+     * Requiring canonical spelling is also the correct read: Zeek writes
+     * canonical addresses, so "2130706433" could only ever build a partition key
+     * that matches nothing. A 400 beats a silent empty result.
+     */
+    private static final Pattern IPV4 = Pattern.compile(
+            "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}");
 
     private Params() {}
 
@@ -69,18 +87,13 @@ public final class Params {
         return addr;
     }
 
-    /**
-     * Literal addresses only. InetAddress.getByName would resolve a hostname,
-     * turning a query parameter into a DNS lookup from inside the function --
-     * so screen the shape first, and only then let the parser confirm it.
-     *
-     * InetAddress.ofLiteral would be the direct expression of this, but it
-     * arrived in Java 22 and this project targets 21.
-     */
     private static boolean isLiteralAddress(String addr) {
-        boolean looksV4 = addr.matches("[0-9.]+");
-        boolean looksV6 = addr.matches("[0-9a-fA-F:.]+") && addr.contains(":");
-        if (!looksV4 && !looksV6) {
+        if (IPV4.matcher(addr).matches()) {
+            return true;
+        }
+        // Colon-bearing strings are parsed as IPv6 literals or fail fast; they
+        // never reach the resolver, so the parser can confirm this branch.
+        if (!addr.contains(":") || !addr.matches("[0-9a-fA-F:.]+")) {
             return false;
         }
         try {
