@@ -76,6 +76,41 @@ class ConnLogParserTest {
             });
     }
 
+    /**
+     * FIX 9: a non-literal id.orig_h (a hostname, say) would be indexed under
+     * a PK no read path can ever address, because Params rejects hostnames.
+     * Zeek always writes literal addresses, so rejecting this at parse time
+     * costs nothing legitimate.
+     */
+    @Test
+    void nonLiteralOrigHIsMalformedWithFieldSpecificReason() {
+        String line = "{\"ts\":1.0,\"uid\":\"U\",\"id.orig_h\":\"gateway\",\"id.orig_p\":1,"
+                    + "\"id.resp_h\":\"2.2.2.2\",\"id.resp_p\":2,\"proto\":\"udp\"}";
+        ParseResult result = parser.parse(line);
+        assertThat(result.records()).isEmpty();
+        assertThat(result.malformed()).singleElement()
+            .satisfies(m -> assertThat(m.reason()).isEqualTo("id.orig_h is not an IP address"));
+    }
+
+    @Test
+    void nonLiteralRespHIsMalformedWithFieldSpecificReason() {
+        String line = "{\"ts\":1.0,\"uid\":\"U\",\"id.orig_h\":\"1.1.1.1\",\"id.orig_p\":1,"
+                    + "\"id.resp_h\":\"gateway.local\",\"id.resp_p\":2,\"proto\":\"udp\"}";
+        ParseResult result = parser.parse(line);
+        assertThat(result.records()).isEmpty();
+        assertThat(result.malformed()).singleElement()
+            .satisfies(m -> assertThat(m.reason()).isEqualTo("id.resp_h is not an IP address"));
+    }
+
+    @Test
+    void literalIpv6EndpointsAreAccepted() {
+        String line = "{\"ts\":1.0,\"uid\":\"U\",\"id.orig_h\":\"2001:db8::1\",\"id.orig_p\":1,"
+                    + "\"id.resp_h\":\"2.2.2.2\",\"id.resp_p\":2,\"proto\":\"udp\"}";
+        ParseResult result = parser.parse(line);
+        assertThat(result.records()).hasSize(1);
+        assertThat(result.malformed()).isEmpty();
+    }
+
     @Test
     void unparseableJsonIsMalformedNotFatal() {
         ParseResult result = parser.parse("not json at all\n" + GOOD);

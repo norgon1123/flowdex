@@ -61,6 +61,12 @@ public class ConnLogParser {
                 throw ApiException.badRequest("MALFORMED_LINE", "missing " + field);
             }
         }
+        // A non-literal address (a hostname, say) would be indexed under a
+        // PK that Params rejects on every read path, producing a row nothing
+        // can ever address. Zeek always writes literal addresses, so this
+        // rejects nothing legitimate.
+        requireIpLiteral(n, "id.orig_h");
+        requireIpLiteral(n, "id.resp_h");
         return new ConnRecord(
                 toInstant(n.get("ts")),
                 n.get("uid").asText(),
@@ -75,6 +81,13 @@ public class ConnLogParser {
                 optionalLong(n, "resp_bytes"),
                 optionalString(n, "conn_state"),
                 lineNo);
+    }
+
+    private void requireIpLiteral(JsonNode n, String field) {
+        String addr = n.get(field).asText();
+        if (!dev.orgon.flowdex.api.Params.isLiteralAddress(addr)) {
+            throw ApiException.badRequest("MALFORMED_LINE", field + " is not an IP address");
+        }
     }
 
     /**

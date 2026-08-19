@@ -28,6 +28,10 @@ public class ApiException extends RuntimeException {
         return new ApiException(413, "PAYLOAD_TOO_LARGE", message, Map.of());
     }
 
+    public static ApiException serviceUnavailable(String message) {
+        return new ApiException(503, "SERVICE_UNAVAILABLE", message, Map.of());
+    }
+
     public int status() { return status; }
     public String code() { return code; }
     public Map<String, Object> details() { return details; }
