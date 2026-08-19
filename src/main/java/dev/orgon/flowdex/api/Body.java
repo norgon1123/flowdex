@@ -6,7 +6,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.Map;
 import java.util.zip.GZIPInputStream;
 
 public final class Body {
@@ -26,17 +25,23 @@ public final class Body {
         if (wire.length > maxBytes) {
             throw ApiException.payloadTooLarge("body exceeds " + maxBytes + " bytes");
         }
-        return isGzip(event) ? gunzip(wire, maxBytes) : wire;
+        return looksGzipped(wire) ? gunzip(wire, maxBytes) : wire;
     }
 
-    private static boolean isGzip(APIGatewayProxyRequestEvent event) {
-        Map<String, String> headers = event.getHeaders();
-        if (headers == null) {
-            return false;
-        }
-        return headers.entrySet().stream()
-                .filter(h -> h.getKey().equalsIgnoreCase("content-encoding"))
-                .anyMatch(h -> h.getValue() != null && h.getValue().toLowerCase().contains("gzip"));
+    /**
+     * The body's own first two bytes decide whether it is gzip — not a header.
+     *
+     * Headers are unreliable here in both directions. A client that pairs
+     * "Content-Type: application/x-ndjson" with "Content-Encoding: gzip" — the
+     * natural pairing — and a client that sends "Content-Type: application/gzip"
+     * with no Content-Encoding at all are both sending gzip, and only one of
+     * them says so in the header this used to read. curl's --data-binary with a
+     * .gz file says neither. The magic number 1f 8b is in the bytes regardless,
+     * and NDJSON cannot begin with it, so sniffing is both stricter and more
+     * permissive than any header rule.
+     */
+    private static boolean looksGzipped(byte[] wire) {
+        return wire.length >= 2 && (wire[0] & 0xff) == 0x1f && (wire[1] & 0xff) == 0x8b;
     }
 
     /**
@@ -58,7 +63,8 @@ public final class Body {
         } catch (ApiException e) {
             throw e;
         } catch (Exception e) {
-            throw ApiException.badRequest("INVALID_GZIP", "Content-Encoding was gzip but the body is not");
+            throw ApiException.badRequest("INVALID_GZIP",
+                    "body starts with the gzip magic number but is not valid gzip");
         }
         return out.toByteArray();
     }

@@ -153,6 +153,81 @@ class ConnLogParserTest {
             .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("EMPTY_BATCH"));
     }
 
+    /**
+     * Byte counts feed an ADD on the shared hourly rollup, and ADD with a
+     * negative value decrements. One crafted line would otherwise reach in and
+     * corrupt an aggregate summarising every other record in that hour.
+     */
+    @Test
+    void negativeByteCountsAndDurationsAreClampedRatherThanDecrementingCounters() {
+        ConnRecord r = parser.parse(withFields(
+                "\"orig_bytes\":-1000000,\"resp_bytes\":-5,\"duration\":-2.5")).records().getFirst();
+
+        assertThat(r.origBytes()).isZero();
+        assertThat(r.respBytes()).isZero();
+        assertThat(r.duration()).isZero();
+    }
+
+    @Test
+    void aZeroDurationIsLeftAlone() {
+        assertThat(parser.parse(withFields("\"duration\":0")).records().getFirst().duration()).isZero();
+    }
+
+    @Test
+    void portsOutsideTheValidRangeAreMalformed() {
+        assertThat(malformedReason(replace(GOOD, "\"id.orig_p\":54321", "\"id.orig_p\":-1")))
+                .contains("id.orig_p", "0-65535");
+        assertThat(malformedReason(replace(GOOD, "\"id.resp_p\":443", "\"id.resp_p\":70000")))
+                .contains("id.resp_p", "0-65535");
+    }
+
+    /** ICMP reuses the port fields for message type and code; both are single bytes. */
+    @Test
+    void icmpTypeAndCodeInThePortFieldsAreAccepted() {
+        ConnRecord r = parser.parse(replace(
+                replace(GOOD, "\"id.orig_p\":54321", "\"id.orig_p\":8"),
+                "\"id.resp_p\":443", "\"id.resp_p\":0")).records().getFirst();
+
+        assertThat(r.origP()).isEqualTo(8);
+        assertThat(r.respP()).isZero();
+    }
+
+    /**
+     * A year outside four digits cannot be written as a fixed-width key, and the
+     * sign character it carries sorts below every digit — one such record would
+     * sort ahead of the entire index and break every range query.
+     */
+    @Test
+    void timestampsOutsideTheRepresentableRangeAreMalformed() {
+        assertThat(malformedReason(replace(GOOD, "\"ts\":1787061802.451", "\"ts\":-6857222400")))
+                .contains("out of range");
+        assertThat(malformedReason(replace(GOOD, "\"ts\":1787061802.451", "\"ts\":99999999999")))
+                .contains("out of range");
+    }
+
+    @Test
+    void anAbsurdlyLargeTimestampIsMalformedRatherThanAnOverflow() {
+        assertThat(malformedReason(replace(GOOD, "\"ts\":1787061802.451", "\"ts\":1e30")))
+                .contains("out of range");
+    }
+
+    private String malformedReason(String line) {
+        ParseResult result = parser.parse(line);
+        assertThat(result.records()).isEmpty();
+        return result.malformed().getFirst().reason();
+    }
+
+    private static String replace(String line, String from, String to) {
+        assertThat(line).contains(from);
+        return line.replace(from, to);
+    }
+
+    /** GOOD with the listed fields overridden. */
+    private static String withFields(String fields) {
+        return "{\"ts\":1787061802.451,\"uid\":\"CHhAvV\",\"id.orig_h\":\"10.0.0.5\",\"id.orig_p\":54321,"
+             + "\"id.resp_h\":\"10.0.0.9\",\"id.resp_p\":443,\"proto\":\"tcp\"," + fields + "}";
+    }
+
     private static java.util.List<MalformedLine> nMalformed(int n) {
         return java.util.stream.IntStream.rangeClosed(1, n)
             .mapToObj(i -> new MalformedLine(i, "r")).toList();

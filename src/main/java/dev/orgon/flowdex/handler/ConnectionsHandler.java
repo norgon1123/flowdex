@@ -7,6 +7,7 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent
 import dev.orgon.flowdex.api.ApiException;
 import dev.orgon.flowdex.api.Log;
 import dev.orgon.flowdex.api.Params;
+import dev.orgon.flowdex.api.RequestId;
 import dev.orgon.flowdex.api.Responses;
 import dev.orgon.flowdex.store.Clients;
 import dev.orgon.flowdex.store.IndexStore;
@@ -30,7 +31,7 @@ public class ConnectionsHandler implements RequestHandler<APIGatewayProxyRequest
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
-        String requestId = context.getAwsRequestId() == null ? "" : context.getAwsRequestId();
+        String requestId = RequestId.of(event, context);
         try {
             Map<String, String> qs = event.getQueryStringParameters();
             String ip = Params.requireIp(qs);

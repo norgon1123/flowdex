@@ -130,10 +130,12 @@ class ConnectionsHandlerIT extends LocalStackBase {
     }
 
     /**
-     * FIX 3: CursorCodec.decode only checks the cursor's PK against the
-     * address, not whether its SK falls inside a narrower range the caller
-     * supplies on the next page. DynamoDB rejects that ExclusiveStartKey
-     * server-side; that must become 400 INVALID_CURSOR, not 500.
+     * Paging once over a wide window and then narrowing it while still holding
+     * the cursor is the common cursor misuse, and it used to reach DynamoDB and
+     * come back as a ValidationException — a 500, blaming the service for the
+     * caller's token. CursorCodec.decode now range-checks the cursor's SK
+     * against the requested bounds, and the server-side rejection remains only
+     * as a backstop. Either way the caller must see 400 INVALID_CURSOR.
      */
     @Test
     void aCursorReusedAgainstANarrowerRangeIsRejectedNotA500() throws Exception {

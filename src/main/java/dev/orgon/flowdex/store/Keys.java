@@ -23,7 +23,25 @@ public final class Keys {
     private static final DateTimeFormatter HOUR =
             DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH").withZone(ZoneOffset.UTC);
 
+    /**
+     * The years the fixed-width key format can actually represent.
+     *
+     * "uuuu" emits four digits for years 1 through 9999 and a signed, wider
+     * form outside that — "+10000-…" or "-0001-…". Instant.parse accepts both,
+     * and the sign characters "+" (0x2B) and "-" (0x2D) sort BELOW every digit,
+     * so a single such record would sort before the whole index and quietly
+     * break the one property every range query depends on. The bound is drawn
+     * far inside the format's limit rather than at it, because a conn.log
+     * timestamp outside [1970, 2100] is a corrupt record, not a real one.
+     */
+    public static final Instant MIN_TS = Instant.parse("1970-01-01T00:00:00Z");
+    public static final Instant MAX_TS = Instant.parse("2100-01-01T00:00:00Z");
+
     private Keys() {}
+
+    public static boolean isRepresentable(Instant ts) {
+        return !ts.isBefore(MIN_TS) && !ts.isAfter(MAX_TS);
+    }
 
     /**
      * Addresses are normalised to a single spelling before they become keys.
