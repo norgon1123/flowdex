@@ -22,12 +22,11 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "raw" {
   }
 }
 
-resource "aws_s3_bucket_versioning" "raw" {
-  bucket = aws_s3_bucket.raw.id
-  versioning_configuration {
-    status = "Suspended"
-  }
-}
+# No aws_s3_bucket_versioning resource, deliberately. "Suspended" is the state a
+# bucket that HAS been versioned returns to; a bucket that never had versioning
+# enabled is already "Disabled", and declaring Suspended only adds an API call
+# that changes nothing. Raw batches are write-once and never mutated, so there
+# is nothing for versioning to protect.
 
 resource "aws_dynamodb_table" "index" {
   name         = local.name

@@ -12,10 +12,20 @@
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!--
+      Reproducible builds. Without a fixed timestamp every "mvn package" writes
+      new entry times into the jar, so filebase64sha256 changes, so Terraform
+      republishes all three functions and re-runs SnapStart on every apply even
+      when no source changed.
+    -->
+    <project.build.outputTimestamp>2026-08-18T00:00:00Z</project.build.outputTimestamp>
     <aws.sdk.version>2.31.30</aws.sdk.version>
     <jackson.version>2.18.2</jackson.version>
     <junit.version>5.11.4</junit.version>
     <testcontainers.version>1.20.6</testcontainers.version>
+    <crac.version>1.5.0</crac.version>
+    <!-- See the failsafe plugin comment below. Override with -Ddocker.api.version=… -->
+    <docker.api.version>1.40</docker.api.version>
   </properties>
 
   <dependencyManagement>
@@ -72,6 +82,16 @@
       <artifactId>jackson-databind</artifactId>
       <version>${jackson.version}</version>
     </dependency>
+    <!--
+      org.crac is the checkpoint/restore API SnapStart implements. The artifact
+      is a few kilobytes and degrades to a no-op wherever no CRaC implementation
+      is present, so registering a hook is safe in unit tests and on a plain JVM.
+    -->
+    <dependency>
+      <groupId>org.crac</groupId>
+      <artifactId>crac</artifactId>
+      <version>${crac.version}</version>
+    </dependency>
 
     <dependency>
       <groupId>org.junit.jupiter</groupId>
@@ -115,14 +135,20 @@
           <!--
             Testcontainers 1.20.6's bundled docker-java defaults to Docker API
             1.32, below the 1.40 minimum modern daemons accept, so the client
-            must be told to ask for something newer. 1.40 is deliberately the
-            floor rather than a current value: it is the lowest this host
-            accepts, and pinning higher would exclude the older daemons on CI
-            runners. There is no environment variable for this in docker-java,
-            and failsafe forks its own JVM, so it has to be set here.
+            must be told to ask for something newer. There is no environment
+            variable for this in docker-java, and failsafe forks its own JVM, so
+            it has to be set here.
+
+            1.40 is deliberately the FLOOR rather than a current value. A
+            daemon accepts any version at or below its own, so asking low works
+            everywhere modern and asking high fails with "client version too
+            new" — the inverse problem, and the one that would break CI runners
+            and clean clones rather than this host. It is a property so a
+            daemon that somehow needs otherwise can be accommodated with
+            -Ddocker.api.version=… instead of a patch.
           -->
           <systemPropertyVariables>
-            <api.version>1.40</api.version>
+            <api.version>${docker.api.version}</api.version>
           </systemPropertyVariables>
         </configuration>
         <executions>
