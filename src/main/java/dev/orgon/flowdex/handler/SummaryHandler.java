@@ -35,7 +35,7 @@ public class SummaryHandler implements RequestHandler<APIGatewayProxyRequestEven
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
-        String requestId = context.getAwsRequestId();
+        String requestId = context.getAwsRequestId() == null ? "" : context.getAwsRequestId();
         try {
             String addr = Params.pathAddr(event);
             Params.Range range = Params.requireRange(event.getQueryStringParameters());

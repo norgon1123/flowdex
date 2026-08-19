@@ -9,6 +9,10 @@ import dev.orgon.flowdex.store.*;
 import dev.orgon.flowdex.zeek.ConnLogParser;
 import dev.orgon.flowdex.zeek.ConnRecord;
 import dev.orgon.flowdex.zeek.ParseResult;
+import software.amazon.awssdk.services.dynamodb.model.InternalServerErrorException;
+import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException;
+import software.amazon.awssdk.services.dynamodb.model.RequestLimitExceededException;
+import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -37,8 +41,10 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
     /**
      * Sequential per-record transactions cannot fit API Gateway's 29-second
      * integration timeout at 5 MB, so transactions are dispatched across a
-     * pool. 32 is chosen for an I/O-bound workload on a 1 vCPU function: the
-     * threads spend their time waiting on DynamoDB, not computing.
+     * pool. 32 is chosen for an I/O-bound workload on a function sized at 1024
+     * MB memory (roughly 0.58 vCPU; Lambda reaches 1 vCPU at 1769 MB): the
+     * threads spend their time waiting on DynamoDB, not computing, so pool
+     * size is not bound by core count.
      */
     public static final int WRITE_CONCURRENCY = 32;
 
@@ -66,6 +72,17 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
         } catch (ApiException e) {
             Log.event("ingest.rejected", Map.of("requestId", requestId, "code", e.code(), "status", e.status()));
             return Responses.error(e, requestId);
+        } catch (TransactionCanceledException | ProvisionedThroughputExceededException
+                 | RequestLimitExceededException | InternalServerErrorException e) {
+            // DynamoDB is saturated or contended, not broken. IndexStore already
+            // retried MAX_ATTEMPTS times with backoff; telling the client "our
+            // bug, don't retry" (500) here would be wrong — this is "we're
+            // loaded, back off" (503).
+            ApiException unavailable = ApiException.serviceUnavailable("index is saturated; retry with backoff");
+            Log.event("ingest.rejected", Map.of(
+                    "requestId", requestId, "code", unavailable.code(), "status", unavailable.status(),
+                    "exception", e.toString()));
+            return Responses.error(unavailable, requestId);
         } catch (RuntimeException e) {
             Log.event("ingest.failed", Map.of("requestId", requestId, "exception", e.toString()));
             e.printStackTrace();

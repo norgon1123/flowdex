@@ -95,6 +95,29 @@ class ConnectionsHandlerIT extends LocalStackBase {
                 .get("error").get("code").asText()).isEqualTo("INVALID_RANGE");
     }
 
+    /**
+     * FIX 1: a row ingested under one spelling of an IPv6 address must be
+     * findable under a different, equally-valid spelling of the same host.
+     * Built inline rather than added to samples/conn-sample.ndjson, which
+     * other tests assert exact counts and totals against.
+     */
+    @Test
+    void ipv6EndpointIngestedOneSpellingIsFoundQueriedWithAnotherSpelling() throws Exception {
+        String line = "{\"ts\":1787061900.000,\"uid\":\"Cv6Rec1\","
+                + "\"id.orig_h\":\"10.0.0.5\",\"id.orig_p\":54321,"
+                + "\"id.resp_h\":\"2001:db8::1\",\"id.resp_p\":443,"
+                + "\"proto\":\"tcp\",\"service\":\"ssl\",\"duration\":1.0,"
+                + "\"orig_bytes\":10,\"resp_bytes\":20,\"conn_state\":\"SF\"}";
+        new IngestHandler(new IndexStore(ddb(), table()), new RawStore(s3(), bucket()))
+                .handleRequest(new APIGatewayProxyRequestEvent().withBody(line), new TestContext("seed-v6"));
+
+        JsonNode body = invoke(Map.of("ip", "2001:DB8::1",
+                "from", "2026-08-18T00:00:00Z", "to", "2026-08-19T00:00:00Z"), 200);
+
+        assertThat(body.get("items")).hasSize(1);
+        assertThat(body.get("items").get(0).get("uid").asText()).isEqualTo("Cv6Rec1");
+    }
+
     @Test
     void aCursorFromAnotherAddressIsRejected() throws Exception {
         JsonNode firstPage = invoke(Map.of("ip", "10.0.0.5",
@@ -104,6 +127,24 @@ class ConnectionsHandlerIT extends LocalStackBase {
         Map<String, String> qs = new HashMap<>(Map.of("ip", "10.0.0.9",
                 "from", "2026-08-18T00:00:00Z", "to", "2026-08-19T00:00:00Z", "cursor", cursor));
         assertThat(invoke(qs, 400).get("error").get("code").asText()).isEqualTo("INVALID_CURSOR");
+    }
+
+    /**
+     * FIX 3: CursorCodec.decode only checks the cursor's PK against the
+     * address, not whether its SK falls inside a narrower range the caller
+     * supplies on the next page. DynamoDB rejects that ExclusiveStartKey
+     * server-side; that must become 400 INVALID_CURSOR, not 500.
+     */
+    @Test
+    void aCursorReusedAgainstANarrowerRangeIsRejectedNotA500() throws Exception {
+        JsonNode firstPage = invoke(Map.of("ip", "10.0.0.5",
+                "from", "2026-08-18T00:00:00Z", "to", "2026-08-19T00:00:00Z", "limit", "1"), 200);
+        String cursor = firstPage.get("nextCursor").asText();
+
+        Map<String, String> qs = new HashMap<>(Map.of("ip", "10.0.0.5",
+                "from", "2026-08-18T14:00:00Z", "to", "2026-08-18T14:01:00Z", "cursor", cursor));
+        JsonNode body = invoke(qs, 400);
+        assertThat(body.get("error").get("code").asText()).isEqualTo("INVALID_CURSOR");
     }
 
     @Test

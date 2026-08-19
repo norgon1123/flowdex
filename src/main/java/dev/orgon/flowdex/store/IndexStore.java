@@ -1,5 +1,6 @@
 package dev.orgon.flowdex.store;
 
+import dev.orgon.flowdex.api.ApiException;
 import dev.orgon.flowdex.api.CursorCodec;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
@@ -140,6 +141,7 @@ public class IndexStore {
      */
     public Page queryConnections(String addr, Instant from, Instant to, int limit, String cursor) {
         String pk = Keys.pk(addr);
+        boolean cursorSupplied = cursor != null && !cursor.isBlank();
         QueryRequest.Builder request = QueryRequest.builder()
                 .tableName(table)
                 .keyConditionExpression("PK = :pk AND SK BETWEEN :from AND :to")
@@ -148,14 +150,33 @@ public class IndexStore {
                         ":from", av(Keys.connBound(from)),
                         ":to", av(Keys.connBound(to))))
                 .limit(limit);
-        if (cursor != null && !cursor.isBlank()) {
+        if (cursorSupplied) {
             request.exclusiveStartKey(CursorCodec.decode(cursor, pk));
         }
 
-        QueryResponse response = ddb.query(request.build());
+        QueryResponse response;
+        try {
+            response = ddb.query(request.build());
+        } catch (DynamoDbException e) {
+            // CursorCodec.decode only validates the cursor's PK. If the caller
+            // narrows from/to while holding a cursor whose SK falls outside the
+            // new range, DynamoDB itself rejects ExclusiveStartKey with this
+            // message — a client mistake, not a server failure. Only translate
+            // it when a cursor was actually supplied, so a genuine service error
+            // on an un-cursored query still surfaces as 500.
+            if (cursorSupplied && startKeyMismatch(e)) {
+                throw ApiException.badRequest("INVALID_CURSOR", "cursor does not belong to this time range");
+            }
+            throw e;
+        }
         Map<String, AttributeValue> last = response.lastEvaluatedKey();
         String next = (last == null || last.isEmpty()) ? null : CursorCodec.encode(last);
         return new Page(response.items(), next);
+    }
+
+    private static boolean startKeyMismatch(DynamoDbException e) {
+        String message = e.getMessage();
+        return message != null && message.toLowerCase(java.util.Locale.ROOT).contains("starting key");
     }
 
     /**

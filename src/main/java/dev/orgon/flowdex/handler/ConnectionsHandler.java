@@ -30,7 +30,7 @@ public class ConnectionsHandler implements RequestHandler<APIGatewayProxyRequest
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
-        String requestId = context.getAwsRequestId();
+        String requestId = context.getAwsRequestId() == null ? "" : context.getAwsRequestId();
         try {
             Map<String, String> qs = event.getQueryStringParameters();
             String ip = Params.requireIp(qs);
