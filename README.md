@@ -569,6 +569,22 @@ to: `mvn verify -Ddocker.api.version=1.44`.
 
 ## Deploy
 
+Configure credentials and a region first. The AWS provider chain reads
+`~/.aws`, and nothing in this repository supplies either one. Without them
+`terraform apply` fails with "No valid credential sources found" — having
+walked the whole chain down to an EC2 IMDS lookup that cannot succeed on a
+laptop — and the `aws` CLI fails with `NoRegion`. `var.region` defaults to
+`us-east-1`, but it is a provider input rather than an environment variable,
+so the CLI never sees it and needs its own.
+
+```bash
+aws configure   # access key, secret, region, output format
+```
+
+That writes `~/.aws/credentials` and `~/.aws/config`. Give it the access key
+of the dedicated IAM user described below, and the region you intend to deploy
+into — passing the same one as `-var region=...` if it is not `us-east-1`.
+
 ```bash
 mvn package
 cd infra
