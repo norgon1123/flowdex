@@ -20,7 +20,9 @@ class ParamsTest {
     @Test
     void acceptsValidIpv4AndIpv6() {
         assertThat(Params.requireIp(qs("ip", "10.0.0.5"))).isEqualTo("10.0.0.5");
-        assertThat(Params.requireIp(qs("ip", "2001:db8::1"))).isEqualTo("2001:db8::1");
+        // IPv6 is returned in its canonical (Keys.canonicalAddr) spelling, not
+        // echoed verbatim — see canonicalisesIpv6ToASingleSpelling below.
+        assertThat(Params.requireIp(qs("ip", "2001:db8::1"))).isEqualTo("2001:db8:0:0:0:0:0:1");
     }
 
     @Test
@@ -115,7 +117,20 @@ class ParamsTest {
         assertThat(Params.requireIp(qs("ip", "10.0.0.5"))).isEqualTo("10.0.0.5");
         assertThat(Params.requireIp(qs("ip", "0.0.0.0"))).isEqualTo("0.0.0.0");
         assertThat(Params.requireIp(qs("ip", "255.255.255.255"))).isEqualTo("255.255.255.255");
-        assertThat(Params.requireIp(qs("ip", "2001:db8::1"))).isEqualTo("2001:db8::1");
-        assertThat(Params.requireIp(qs("ip", "::1"))).isEqualTo("::1");
+        assertThat(Params.requireIp(qs("ip", "2001:db8::1"))).isEqualTo("2001:db8:0:0:0:0:0:1");
+        assertThat(Params.requireIp(qs("ip", "::1"))).isEqualTo("0:0:0:0:0:0:0:1");
+    }
+
+    /**
+     * FIX 1: three spellings of the same host must not just be individually
+     * valid — they must return the identical canonical form, which is what
+     * keeps a lookup spelled differently from ingestion from silently missing.
+     */
+    @Test
+    void canonicalisesIpv6ToASingleSpelling() {
+        String canonical = Params.requireIp(qs("ip", "2001:db8::1"));
+        assertThat(Params.requireIp(qs("ip", "2001:DB8::1"))).isEqualTo(canonical);
+        assertThat(Params.requireIp(qs("ip", "2001:0db8:0000:0000:0000:0000:0000:0001")))
+                .isEqualTo(canonical);
     }
 }

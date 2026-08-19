@@ -43,11 +43,11 @@ public record IndexRow(
     public static IndexRow forSide(ConnRecord r, String addr, String s3Key) {
         boolean isOrig = addr.equals(r.origH());
         return new IndexRow(
-                addr,
+                Keys.canonicalAddr(addr),
                 r.ts(),
                 r.uid(),
                 isOrig ? "orig" : "resp",
-                isOrig ? r.respH() : r.origH(),
+                Keys.canonicalAddr(isOrig ? r.respH() : r.origH()),
                 isOrig ? r.origP() : r.respP(),
                 isOrig ? r.respP() : r.origP(),
                 r.proto(),

@@ -25,7 +25,30 @@ public final class Keys {
 
     private Keys() {}
 
-    public static String pk(String addr) { return "IP#" + addr; }
+    /**
+     * Addresses are normalised to a single spelling before they become keys.
+     *
+     * IPv6 has many spellings of one address — 2001:db8::1, 2001:DB8::1, and the
+     * fully expanded form are the same host — so without this, a lookup spelled
+     * differently from the ingested form returns an empty page and reads as "no
+     * traffic". Both the write and the read path call pk(), so normalising here is
+     * what keeps them from drifting apart.
+     *
+     * A value that is not an IP literal is returned unchanged rather than rejected;
+     * key construction is not the place to validate input.
+     */
+    public static String canonicalAddr(String addr) {
+        if (addr == null || addr.isEmpty() || addr.indexOf(':') < 0) {
+            return addr;
+        }
+        try {
+            return java.net.InetAddress.getByName(addr).getHostAddress();
+        } catch (Exception e) {
+            return addr;
+        }
+    }
+
+    public static String pk(String addr) { return "IP#" + canonicalAddr(addr); }
 
     public static String formatTs(Instant ts) { return TS.format(ts); }
 

@@ -84,10 +84,18 @@ public final class Params {
         if (!isLiteralAddress(addr)) {
             throw ApiException.badRequest("INVALID_IP", "not a literal IP address: " + addr);
         }
-        return addr;
+        // Canonicalise so the value the handler logs and echoes back matches
+        // what Keys.pk() derived and what was actually stored under it.
+        return dev.orgon.flowdex.store.Keys.canonicalAddr(addr);
     }
 
-    private static boolean isLiteralAddress(String addr) {
+    /**
+     * True when addr is a literal IPv4 or IPv6 address, false for anything else
+     * (hostnames included). Package-visible reuse: ConnLogParser calls this to
+     * reject non-literal endpoint addresses at ingest time, so a record never
+     * gets indexed under a key no read path can address.
+     */
+    public static boolean isLiteralAddress(String addr) {
         if (IPV4.matcher(addr).matches()) {
             return true;
         }

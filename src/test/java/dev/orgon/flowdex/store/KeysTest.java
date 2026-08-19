@@ -73,4 +73,25 @@ class KeysTest {
         Instant i = Instant.parse("2026-08-18T14:03:22.451Z");
         assertThat(Keys.parseTs(Keys.formatTs(i))).isEqualTo(i);
     }
+
+    /**
+     * FIX 1: three spellings of the same IPv6 address must produce one
+     * identical partition key. Before canonicalAddr existed, pk() used the
+     * address verbatim, so a row stored under "2001:db8::1" was unreachable
+     * under "2001:DB8::1" or the fully expanded form — a silent empty page.
+     */
+    @Test
+    void threeSpellingsOfOneIpv6AddressProduceOneIdenticalPk() {
+        String canonical = Keys.pk("2001:db8::1");
+        assertThat(Keys.pk("2001:DB8::1")).isEqualTo(canonical);
+        assertThat(Keys.pk("2001:0db8:0000:0000:0000:0000:0000:0001")).isEqualTo(canonical);
+    }
+
+    @Test
+    void canonicalAddrLeavesIpv4AndNonIpValuesUntouched() {
+        assertThat(Keys.canonicalAddr("10.0.0.5")).isEqualTo("10.0.0.5");
+        assertThat(Keys.canonicalAddr("not-an-ip")).isEqualTo("not-an-ip");
+        assertThat(Keys.canonicalAddr(null)).isNull();
+        assertThat(Keys.canonicalAddr("")).isEqualTo("");
+    }
 }
