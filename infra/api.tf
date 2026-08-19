@@ -5,8 +5,16 @@ resource "aws_api_gateway_rest_api" "api" {
   # HTTP API would need a Lambda authorizer to gate access, which is more
   # moving parts than the requirement justifies.
 
-  # gzip request bodies arrive as binary and are base64-encoded to the handler.
-  binary_media_types = ["application/gzip", "application/octet-stream"]
+  # Every request body is handed to the handler as base64-encoded binary.
+  #
+  # API Gateway REST selects binary handling by Content-TYPE, and gzip is
+  # normally announced with Content-ENCODING — two different headers. Listing
+  # specific types therefore mangles the natural pairing
+  # ("Content-Type: application/x-ndjson" + "Content-Encoding: gzip"): the
+  # gateway decodes those bytes as UTF-8 and the handler sees rubbish. "*/*" is
+  # safe under AWS_PROXY because the handler branches on isBase64Encoded and
+  # sniffs the gzip magic number itself, so it never has to trust either header.
+  binary_media_types = ["*/*"]
 
   endpoint_configuration {
     types = ["REGIONAL"]
@@ -86,9 +94,20 @@ resource "aws_api_gateway_integration" "route" {
 resource "aws_api_gateway_deployment" "api" {
   rest_api_id = aws_api_gateway_rest_api.api.id
 
-  # Redeploy whenever any route or integration changes.
+  # Redeploy whenever anything the stage serves changes.
+  #
+  # The resources and the REST API's own settings belong in this hash as much
+  # as the methods do: binary_media_types and a renamed path_part change what
+  # the stage does while leaving every method and integration byte-identical,
+  # so hashing only those two would leave the fix deployed but not live.
   triggers = {
     redeploy = sha1(jsonencode([
+      aws_api_gateway_rest_api.api.binary_media_types,
+      aws_api_gateway_resource.ingest.path_part,
+      aws_api_gateway_resource.connections.path_part,
+      aws_api_gateway_resource.ip.path_part,
+      aws_api_gateway_resource.addr.path_part,
+      aws_api_gateway_resource.summary.path_part,
       aws_api_gateway_method.route,
       aws_api_gateway_integration.route,
     ]))

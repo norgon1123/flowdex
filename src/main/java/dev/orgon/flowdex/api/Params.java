@@ -2,8 +2,12 @@ package dev.orgon.flowdex.api;
 
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 
+import dev.orgon.flowdex.store.Keys;
+
 import java.net.InetAddress;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -13,6 +17,14 @@ public final class Params {
 
     public static final int DEFAULT_LIMIT = 100;
     public static final int MAX_LIMIT = 1000;
+
+    /**
+     * The summary reads one rollup row per hour in the window and pages until
+     * they are all in memory, so an unbounded window is bounded only by the
+     * function timeout — a 50-year request is a slow 504 rather than an answer.
+     * A year is far past any plausible investigation and cheap to state.
+     */
+    public static final Duration MAX_SUMMARY_WINDOW = Duration.ofDays(366);
 
     /**
      * Canonical dotted-quad only: each octet 0-255, no leading zeros.
@@ -46,13 +58,36 @@ public final class Params {
         return validateAddr(addr);
     }
 
+    /**
+     * Bounds are truncated to milliseconds HERE rather than left to be truncated
+     * implicitly by key formatting later.
+     *
+     * Sort keys carry three fractional digits, so any finer precision a caller
+     * sends is lost the moment the bound becomes a key — silently, and only on
+     * one of the two paths, since the summary echoes its window back and
+     * /connections does not. Truncating up front means the value that is
+     * validated, the value that is echoed, and the value that is queried with
+     * are the same value. The API's granularity is milliseconds; sub-millisecond
+     * input is rounded down to it, not honoured.
+     */
     public static Range requireRange(Map<String, String> qs) {
-        Instant from = parseInstant(get(qs, "from"), "from");
-        Instant to = parseInstant(get(qs, "to"), "to");
+        Instant from = parseInstant(get(qs, "from"), "from").truncatedTo(ChronoUnit.MILLIS);
+        Instant to = parseInstant(get(qs, "to"), "to").truncatedTo(ChronoUnit.MILLIS);
         if (!from.isBefore(to)) {
-            throw ApiException.badRequest("INVALID_RANGE", "from must be strictly before to");
+            throw ApiException.badRequest("INVALID_RANGE",
+                    "from must be strictly before to, at millisecond granularity");
         }
         return new Range(from, to);
+    }
+
+    /** The summary's window, additionally capped at {@link #MAX_SUMMARY_WINDOW}. */
+    public static Range requireSummaryRange(Map<String, String> qs) {
+        Range range = requireRange(qs);
+        if (Duration.between(range.from(), range.to()).compareTo(MAX_SUMMARY_WINDOW) > 0) {
+            throw ApiException.badRequest("WINDOW_TOO_LARGE",
+                    "summary window may not exceed " + MAX_SUMMARY_WINDOW.toDays() + " days");
+        }
+        return range;
     }
 
     public static int limit(Map<String, String> qs) {
@@ -86,7 +121,7 @@ public final class Params {
         }
         // Canonicalise so the value the handler logs and echoes back matches
         // what Keys.pk() derived and what was actually stored under it.
-        return dev.orgon.flowdex.store.Keys.canonicalAddr(addr);
+        return Keys.canonicalAddr(addr);
     }
 
     /**
@@ -113,10 +148,18 @@ public final class Params {
     }
 
     private static Instant parseInstant(String raw, String name) {
+        Instant parsed;
         try {
-            return Instant.parse(raw);
+            parsed = Instant.parse(raw);
         } catch (Exception e) {
             throw ApiException.badRequest("INVALID_TIMESTAMP", name + " must be an ISO-8601 instant, e.g. 2026-08-18T14:00:00Z");
         }
+        // Instant.parse happily accepts year 10000 and negative years, which no
+        // fixed-width key can express. See Keys.isRepresentable.
+        if (!Keys.isRepresentable(parsed)) {
+            throw ApiException.badRequest("INVALID_TIMESTAMP",
+                    name + " must fall between " + Keys.MIN_TS + " and " + Keys.MAX_TS);
+        }
+        return parsed;
     }
 }

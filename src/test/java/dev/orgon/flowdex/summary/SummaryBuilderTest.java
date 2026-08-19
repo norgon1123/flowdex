@@ -58,8 +58,17 @@ class SummaryBuilderTest {
         assertThat(s.truncated()).isFalse();
     }
 
+    /**
+     * SummaryBuilder's half of truncation only: the flag is decided by
+     * IndexStore.scanPeers and carried through here untouched, so this asserts
+     * the carry-through and the top-10 cap, not the budget logic. Whether the
+     * flag is set correctly in the first place — including the case where the
+     * page budget runs out exactly at the true end of the data — is
+     * IndexStorePeerScanTest's job, against a fake that can control page counts
+     * and LastEvaluatedKey presence directly.
+     */
     @Test
-    void topPeersAreCappedAtTenAndTruncationIsCarriedThrough() {
+    void topPeersAreCappedAtTenAndTheTruncationFlagIsCarriedThrough() {
         List<Map<String, AttributeValue>> rows = new java.util.ArrayList<>();
         for (int i = 0; i < 30; i++) {
             for (int j = 0; j <= i; j++) {

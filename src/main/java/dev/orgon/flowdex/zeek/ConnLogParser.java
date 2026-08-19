@@ -71,16 +71,47 @@ public class ConnLogParser {
                 toInstant(n.get("ts")),
                 n.get("uid").asText(),
                 n.get("id.orig_h").asText(),
-                n.get("id.orig_p").asInt(),
+                requirePort(n, "id.orig_p"),
                 n.get("id.resp_h").asText(),
-                n.get("id.resp_p").asInt(),
+                requirePort(n, "id.resp_p"),
                 n.get("proto").asText(),
                 optionalString(n, "service"),
-                optionalDouble(n, "duration"),
-                optionalLong(n, "orig_bytes"),
-                optionalLong(n, "resp_bytes"),
+                nonNegative(optionalDouble(n, "duration")),
+                nonNegative(optionalLong(n, "orig_bytes")),
+                nonNegative(optionalLong(n, "resp_bytes")),
                 optionalString(n, "conn_state"),
                 lineNo);
+    }
+
+    /**
+     * Byte counts feed an ADD on the hourly rollup, and ADD with a negative
+     * value DECREMENTS. A crafted line with "orig_bytes": -1000000 would
+     * therefore reach in and corrupt a counter that summarises every other
+     * record in that hour — an aggregate this tool exists to be trusted about.
+     * Zeek never emits a negative count or duration, so clamping costs nothing
+     * legitimate and closes the write-side path to poisoned aggregates.
+     */
+    private static long nonNegative(long v) { return Math.max(v, 0L); }
+
+    private static double nonNegative(double v) { return v < 0 ? 0.0 : v; }
+
+    /**
+     * For ICMP, Zeek reuses the port fields for message type and code, so the
+     * range check has to admit them — both are single bytes and fall inside it
+     * naturally. What it rejects is a negative or above-65535 value, which is
+     * neither a port nor an ICMP type and which would otherwise be stored and
+     * returned as though it were one.
+     */
+    private int requirePort(JsonNode n, String field) {
+        JsonNode v = n.get(field);
+        if (!v.canConvertToInt()) {
+            throw ApiException.badRequest("MALFORMED_LINE", field + " is not a port number");
+        }
+        int port = v.asInt();
+        if (port < 0 || port > 65535) {
+            throw ApiException.badRequest("MALFORMED_LINE", field + " is out of range 0-65535");
+        }
+        return port;
     }
 
     private void requireIpLiteral(JsonNode n, String field) {
@@ -99,8 +130,21 @@ public class ConnLogParser {
         if (!ts.isNumber() && !isNumericText(ts)) {
             throw ApiException.badRequest("MALFORMED_LINE", "ts is not a number");
         }
-        BigDecimal seconds = new BigDecimal(ts.asText());
-        return Instant.ofEpochMilli(seconds.movePointRight(3).setScale(0, java.math.RoundingMode.HALF_UP).longValueExact());
+        Instant instant;
+        try {
+            BigDecimal seconds = new BigDecimal(ts.asText());
+            instant = Instant.ofEpochMilli(
+                    seconds.movePointRight(3).setScale(0, java.math.RoundingMode.HALF_UP).longValueExact());
+        } catch (ArithmeticException e) {
+            throw ApiException.badRequest("MALFORMED_LINE", "ts is out of range");
+        }
+        // A year outside four digits cannot be written as a fixed-width key, and
+        // the sign character it would carry sorts below every digit — one such
+        // record ahead of the whole index. See Keys.isRepresentable.
+        if (!dev.orgon.flowdex.store.Keys.isRepresentable(instant)) {
+            throw ApiException.badRequest("MALFORMED_LINE", "ts is out of range");
+        }
+        return instant;
     }
 
     private boolean isNumericText(JsonNode n) {

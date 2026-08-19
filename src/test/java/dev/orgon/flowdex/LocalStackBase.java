@@ -12,8 +12,10 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 
 /**
  * One LocalStack container for the whole run, started lazily and torn down by
- * the JVM shutdown hook Testcontainers installs. Each test method gets a fresh
- * table and bucket so tests cannot leak state into one another.
+ * the JVM shutdown hook Testcontainers installs. Each test METHOD gets a fresh
+ * table and bucket, provisioned in {@code @BeforeEach} and named from a shared
+ * counter, so no test can leak state into another — including two methods of
+ * the same class.
  */
 public abstract class LocalStackBase {
 

@@ -133,4 +133,63 @@ class ParamsTest {
         assertThat(Params.requireIp(qs("ip", "2001:0db8:0000:0000:0000:0000:0000:0001")))
                 .isEqualTo(canonical);
     }
+
+    /**
+     * Sort keys carry three fractional digits, so finer precision is lost the
+     * moment a bound becomes a key. Truncating up front means the value that is
+     * validated, echoed and queried with is one value, not three.
+     */
+    @Test
+    void rangeBoundsAreTruncatedToMillisecondGranularity() {
+        Params.Range range = Params.requireRange(
+                qs("from", "2026-08-18T14:00:00.0009Z", "to", "2026-08-18T15:00:00.999999Z"));
+
+        assertThat(range.from()).isEqualTo(Instant.parse("2026-08-18T14:00:00Z"));
+        assertThat(range.to()).isEqualTo(Instant.parse("2026-08-18T15:00:00.999Z"));
+    }
+
+    @Test
+    void aRangeThatCollapsesToNothingOnceTruncatedIsRejected() {
+        assertThatThrownBy(() -> Params.requireRange(
+                qs("from", "2026-08-18T14:00:00.0001Z", "to", "2026-08-18T14:00:00.0009Z")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("INVALID_RANGE"));
+    }
+
+    /**
+     * Instant.parse accepts year 10000 and negative years; "uuuu" then emits a
+     * leading "+" or "-", which sorts below every digit and breaks the
+     * lexicographic-equals-chronological property the whole index rests on.
+     */
+    @Test
+    void timestampsOutsideTheRepresentableYearRangeAreRejected() {
+        assertThatThrownBy(() -> Params.requireRange(
+                qs("from", "+10000-01-01T00:00:00Z", "to", "+10000-01-02T00:00:00Z")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("INVALID_TIMESTAMP"));
+
+        assertThatThrownBy(() -> Params.requireRange(
+                qs("from", "1969-12-31T23:59:59Z", "to", "2026-08-18T15:00:00Z")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("INVALID_TIMESTAMP"));
+    }
+
+    /**
+     * The summary pages one rollup row per hour in the window, so an unbounded
+     * window is bounded only by the function timeout — a slow 504 rather than
+     * an answer.
+     */
+    @Test
+    void anAbsurdlyWideSummaryWindowIsRejected() {
+        assertThatThrownBy(() -> Params.requireSummaryRange(
+                qs("from", "1970-01-01T00:00:00Z", "to", "2099-01-01T00:00:00Z")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("WINDOW_TOO_LARGE"));
+    }
+
+    @Test
+    void aWindowInsideTheCapIsAccepted() {
+        assertThat(Params.requireSummaryRange(qs("from", "2026-01-01T00:00:00Z", "to", "2026-08-18T00:00:00Z")).to())
+                .isEqualTo(Instant.parse("2026-08-18T00:00:00Z"));
+    }
 }
