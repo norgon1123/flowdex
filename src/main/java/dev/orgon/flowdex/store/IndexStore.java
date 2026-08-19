@@ -232,6 +232,28 @@ public class IndexStore {
                 return new PeerScan(rows, false);
             }
         }
-        return new PeerScan(rows, true);
+        return new PeerScan(rows, moreRowsRemain(addr, from, to, start));
+    }
+
+    /**
+     * DynamoDB sets LastEvaluatedKey whenever a query stops on Limit, whether or
+     * not anything is actually left, so the page budget running out is not by
+     * itself evidence of truncation. One Limit-1 probe from where the scan stopped
+     * settles it. A flag that over-reports partial results teaches analysts to
+     * ignore it, which costs exactly what silent truncation costs.
+     */
+    private boolean moreRowsRemain(String addr, Instant from, Instant to,
+                                   Map<String, AttributeValue> start) {
+        QueryResponse probe = ddb.query(QueryRequest.builder()
+                .tableName(table)
+                .keyConditionExpression("PK = :pk AND SK BETWEEN :from AND :to")
+                .expressionAttributeValues(Map.of(
+                        ":pk", av(Keys.pk(addr)),
+                        ":from", av(Keys.connBound(from)),
+                        ":to", av(Keys.connBound(to))))
+                .exclusiveStartKey(start)
+                .limit(1)
+                .build());
+        return !probe.items().isEmpty();
     }
 }
