@@ -42,7 +42,9 @@ public class ConnectionsHandler implements RequestHandler<APIGatewayProxyRequest
 
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("items", page.items().stream().map(ConnectionsHandler::toItem).toList());
-            body.put("nextCursor", page.nextCursor());
+            if (page.nextCursor() != null) {
+                body.put("nextCursor", page.nextCursor());
+            }
 
             Log.event("connections.served", Map.of(
                     "requestId", requestId, "ip", ip, "returned", page.items().size(),
@@ -61,34 +63,48 @@ public class ConnectionsHandler implements RequestHandler<APIGatewayProxyRequest
     /** Rows are already oriented at write time, so this is a straight projection. */
     private static Map<String, Object> toItem(Map<String, AttributeValue> row) {
         Map<String, Object> item = new LinkedHashMap<>();
-        putIfPresent(item, row, "uid", false);
-        putIfPresent(item, row, "ts", false);
-        putIfPresent(item, row, "role", false);
-        putIfPresent(item, row, "peer", false);
-        putIfPresent(item, row, "localPort", true);
-        putIfPresent(item, row, "peerPort", true);
-        putIfPresent(item, row, "proto", false);
-        putIfPresent(item, row, "service", false);
-        putIfPresent(item, row, "duration", true);
-        putIfPresent(item, row, "bytesOut", true);
-        putIfPresent(item, row, "bytesIn", true);
-        putIfPresent(item, row, "connState", false);
-        putIfPresent(item, row, "s3Key", false);
-        putIfPresent(item, row, "s3Line", true);
+        putString(item, row, "uid");
+        putString(item, row, "ts");
+        putString(item, row, "role");
+        putString(item, row, "peer");
+        putLong(item, row, "localPort");
+        putLong(item, row, "peerPort");
+        putString(item, row, "proto");
+        putString(item, row, "service");
+        putDouble(item, row, "duration");
+        putLong(item, row, "bytesOut");
+        putLong(item, row, "bytesIn");
+        putString(item, row, "connState");
+        putString(item, row, "s3Key");
+        putLong(item, row, "s3Line");
         return item;
     }
 
-    private static void putIfPresent(Map<String, Object> out, Map<String, AttributeValue> row,
-                                     String field, boolean numeric) {
+    private static void putString(Map<String, Object> out, Map<String, AttributeValue> row, String field) {
         AttributeValue v = row.get(field);
-        if (v == null) {
-            return;
-        }
-        if (numeric) {
-            String n = v.n();
-            out.put(field, n.contains(".") ? Double.valueOf(n) : Long.valueOf(n));
-        } else if (v.s() != null) {
+        if (v != null && v.s() != null) {
             out.put(field, v.s());
+        }
+    }
+
+    /**
+     * Ports, byte counts and line numbers are always integers on the wire.
+     * The type is chosen per field rather than by sniffing the stored string,
+     * because DynamoDB trims trailing zeroes — a duration of 30.0 comes back as
+     * "30", and sniffing would flip that field's JSON type from row to row.
+     */
+    private static void putLong(Map<String, Object> out, Map<String, AttributeValue> row, String field) {
+        AttributeValue v = row.get(field);
+        if (v != null && v.n() != null) {
+            out.put(field, Long.valueOf(v.n()));
+        }
+    }
+
+    /** duration is always floating point, even when its stored form has no decimal point. */
+    private static void putDouble(Map<String, Object> out, Map<String, AttributeValue> row, String field) {
+        AttributeValue v = row.get(field);
+        if (v != null && v.n() != null) {
+            out.put(field, Double.valueOf(v.n()));
         }
     }
 }

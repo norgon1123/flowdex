@@ -106,6 +106,47 @@ class ConnectionsHandlerIT extends LocalStackBase {
         assertThat(invoke(qs, 400).get("error").get("code").asText()).isEqualTo("INVALID_CURSOR");
     }
 
+    @Test
+    void integerFieldsAreIntegers() throws Exception {
+        JsonNode body = invoke(Map.of("ip", "10.0.0.9",
+                "from", "2026-08-18T00:00:00Z", "to", "2026-08-19T00:00:00Z"), 200);
+
+        JsonNode item = body.get("items").get(0);
+        assertThat(item.get("localPort").isIntegralNumber()).isTrue();
+        assertThat(item.get("peerPort").isIntegralNumber()).isTrue();
+        assertThat(item.get("bytesOut").isIntegralNumber()).isTrue();
+        assertThat(item.get("bytesIn").isIntegralNumber()).isTrue();
+        assertThat(item.get("s3Line").isIntegralNumber()).isTrue();
+        assertThat(item.get("localPort").isFloatingPointNumber()).isFalse();
+    }
+
+    @Test
+    void durationStaysFloatingPointEvenWhenWhole() throws Exception {
+        JsonNode body = invoke(Map.of("ip", "192.168.1.2",
+                "from", "2026-08-18T00:00:00Z", "to", "2026-08-19T00:00:00Z"), 200);
+
+        JsonNode item = body.get("items").get(0);
+        assertThat(item.get("duration").isFloatingPointNumber()).isTrue();
+        assertThat(item.get("duration").asDouble()).isEqualTo(30.0);
+    }
+
+    @Test
+    void nextCursorIsAbsentNotNullOnFinalPage() throws Exception {
+        JsonNode body = invoke(Map.of("ip", "203.0.113.7",
+                "from", "2026-08-18T00:00:00Z", "to", "2026-08-19T00:00:00Z"), 200);
+
+        assertThat(body.has("nextCursor")).isFalse();
+    }
+
+    @Test
+    void nextCursorIsPresentWhenMorePagesRemain() throws Exception {
+        JsonNode body = invoke(Map.of("ip", "10.0.0.5",
+                "from", "2026-08-18T00:00:00Z", "to", "2026-08-19T00:00:00Z", "limit", "1"), 200);
+
+        assertThat(body.has("nextCursor")).isTrue();
+        assertThat(body.get("nextCursor").asText()).isNotBlank();
+    }
+
     private JsonNode invoke(Map<String, String> qs, int expectedStatus) throws Exception {
         APIGatewayProxyResponseEvent response = handler.handleRequest(
                 new APIGatewayProxyRequestEvent().withQueryStringParameters(new HashMap<>(qs)),
