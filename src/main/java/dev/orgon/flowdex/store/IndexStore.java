@@ -1,10 +1,14 @@
 package dev.orgon.flowdex.store;
 
+import dev.orgon.flowdex.api.CursorCodec;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * All DynamoDB access. One TransactWriteItems per row pairs a conditional Put
@@ -119,4 +123,115 @@ public class IndexStore {
 
     static AttributeValue av(String v) { return AttributeValue.builder().s(v).build(); }
     static AttributeValue num(Number v) { return AttributeValue.builder().n(v.toString()).build(); }
+
+    public static final int PEER_PAGE_SIZE = 1000;
+    public static final int PEER_MAX_PAGES = 5;
+
+    public record Page(List<Map<String, AttributeValue>> items, String nextCursor) {}
+
+    public record PeerScan(List<Map<String, AttributeValue>> rows, boolean truncated) {}
+
+    /**
+     * PK = IP#addr AND SK BETWEEN C#from AND C#to.
+     *
+     * Stored sort keys always carry a #uid suffix, so a row at exactly `to`
+     * sorts above the bare C#to bound and is excluded — which is what makes
+     * the upper bound exclusive with no sentinel character.
+     */
+    public Page queryConnections(String addr, Instant from, Instant to, int limit, String cursor) {
+        String pk = Keys.pk(addr);
+        QueryRequest.Builder request = QueryRequest.builder()
+                .tableName(table)
+                .keyConditionExpression("PK = :pk AND SK BETWEEN :from AND :to")
+                .expressionAttributeValues(Map.of(
+                        ":pk", av(pk),
+                        ":from", av(Keys.connBound(from)),
+                        ":to", av(Keys.connBound(to))))
+                .limit(limit);
+        if (cursor != null && !cursor.isBlank()) {
+            request.exclusiveStartKey(CursorCodec.decode(cursor, pk));
+        }
+
+        QueryResponse response = ddb.query(request.build());
+        Map<String, AttributeValue> last = response.lastEvaluatedKey();
+        String next = (last == null || last.isEmpty()) ? null : CursorCodec.encode(last);
+        return new Page(response.items(), next);
+    }
+
+    /**
+     * First or last seen, exact. DynamoDB cannot express min or max in an
+     * update, so rather than emulating it on the write path with conditional
+     * writes that abort on ordinary data, read the edge of the index range:
+     * one item, forward or reverse.
+     */
+    public Optional<Instant> edge(String addr, Instant from, Instant to, boolean forward) {
+        QueryResponse response = ddb.query(QueryRequest.builder()
+                .tableName(table)
+                .keyConditionExpression("PK = :pk AND SK BETWEEN :from AND :to")
+                .expressionAttributeValues(Map.of(
+                        ":pk", av(Keys.pk(addr)),
+                        ":from", av(Keys.connBound(from)),
+                        ":to", av(Keys.connBound(to))))
+                .scanIndexForward(forward)
+                .limit(1)
+                .build());
+        return response.items().isEmpty()
+                ? Optional.empty()
+                : Optional.of(Keys.parseTs(response.items().getFirst().get("ts").s()));
+    }
+
+    /** Both bounds are hour-truncated instants, inclusive. */
+    public List<Map<String, AttributeValue>> queryRollups(String addr, Instant fromHour, Instant lastHour) {
+        List<Map<String, AttributeValue>> all = new ArrayList<>();
+        Map<String, AttributeValue> start = null;
+        do {
+            QueryRequest.Builder request = QueryRequest.builder()
+                    .tableName(table)
+                    .keyConditionExpression("PK = :pk AND SK BETWEEN :from AND :to")
+                    .expressionAttributeValues(Map.of(
+                            ":pk", av(Keys.pk(addr)),
+                            ":from", av(Keys.rollupBound(fromHour)),
+                            ":to", av(Keys.rollupBound(lastHour))));
+            if (start != null) {
+                request.exclusiveStartKey(start);
+            }
+            QueryResponse response = ddb.query(request.build());
+            all.addAll(response.items());
+            start = response.lastEvaluatedKey();
+        } while (start != null && !start.isEmpty());
+        return all;
+    }
+
+    /**
+     * Rows for the peer tally, projected down to what the tally needs.
+     * Bounded at PEER_MAX_PAGES x PEER_PAGE_SIZE rows; exhausting the budget
+     * sets truncated, which the response surfaces. Silent truncation in a
+     * security tool is how analysts reach confident wrong conclusions.
+     */
+    public PeerScan scanPeers(String addr, Instant from, Instant to) {
+        List<Map<String, AttributeValue>> rows = new ArrayList<>();
+        Map<String, AttributeValue> start = null;
+        for (int page = 0; page < PEER_MAX_PAGES; page++) {
+            QueryRequest.Builder request = QueryRequest.builder()
+                    .tableName(table)
+                    .keyConditionExpression("PK = :pk AND SK BETWEEN :from AND :to")
+                    .expressionAttributeValues(Map.of(
+                            ":pk", av(Keys.pk(addr)),
+                            ":from", av(Keys.connBound(from)),
+                            ":to", av(Keys.connBound(to))))
+                    .projectionExpression("#peer, #bo, #bi")
+                    .expressionAttributeNames(Map.of("#peer", "peer", "#bo", "bytesOut", "#bi", "bytesIn"))
+                    .limit(PEER_PAGE_SIZE);
+            if (start != null) {
+                request.exclusiveStartKey(start);
+            }
+            QueryResponse response = ddb.query(request.build());
+            rows.addAll(response.items());
+            start = response.lastEvaluatedKey();
+            if (start == null || start.isEmpty()) {
+                return new PeerScan(rows, false);
+            }
+        }
+        return new PeerScan(rows, true);
+    }
 }
