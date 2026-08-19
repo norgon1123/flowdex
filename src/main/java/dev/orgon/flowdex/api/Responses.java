@@ -32,7 +32,12 @@ public final class Responses {
         return response(500, Map.of("error", Map.of(
                 "code", "INTERNAL",
                 "message", "unexpected error",
-                "details", Map.of("requestId", requestId))), requestId);
+                "details", Map.of("requestId", safeId(requestId)))), requestId);
+    }
+
+    /** Map.of rejects null values, and this is the one path that must never throw. */
+    private static String safeId(String requestId) {
+        return requestId == null ? "" : requestId;
     }
 
     private static APIGatewayProxyResponseEvent response(int status, Object payload, String requestId) {

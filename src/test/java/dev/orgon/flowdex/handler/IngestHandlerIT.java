@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 
 import java.nio.charset.StandardCharsets;
@@ -118,6 +119,43 @@ class IngestHandlerIT extends LocalStackBase {
 
         assertThat(s3().listObjectsV2(ListObjectsV2Request.builder().bucket(bucket()).build()).contents())
                 .isEmpty();
+        assertThat(tableIsEmpty()).isTrue();
+    }
+
+    /** The 5 MB body cap is enforced before anything is persisted. */
+    @Test
+    void anOversizeBodyIs413AndPersistsNothing() throws Exception {
+        String oversized = "x".repeat(IngestHandler.MAX_BODY_BYTES + 1);
+        JsonNode body = invoke(oversized, 413);
+
+        assertThat(body.get("error").get("code").asText()).isEqualTo("PAYLOAD_TOO_LARGE");
+        assertThat(s3().listObjectsV2(ListObjectsV2Request.builder().bucket(bucket()).build()).contents())
+                .isEmpty();
+        assertThat(tableIsEmpty()).isTrue();
+    }
+
+    /**
+     * The record-count cap is only reachable with compact records: MAX_RECORDS
+     * + 1 records at a realistic ~300 bytes each would trip the 5 MB body cap
+     * first. These lines run about 105 bytes each, so the batch stays well
+     * under MAX_BODY_BYTES and it is genuinely the record cap being tested.
+     */
+    @Test
+    void tooManyRecordsIs413AndPersistsNothing() throws Exception {
+        StringBuilder batch = new StringBuilder();
+        for (int i = 0; i <= IngestHandler.MAX_RECORDS; i++) {
+            batch.append("{\"ts\":1787061802.451,\"uid\":\"U").append(i)
+                 .append("\",\"id.orig_h\":\"10.0.0.5\",\"id.orig_p\":1,")
+                 .append("\"id.resp_h\":\"10.0.0.9\",\"id.resp_p\":2,\"proto\":\"udp\"}\n");
+        }
+        assertThat(batch.length()).isLessThan(IngestHandler.MAX_BODY_BYTES);
+
+        JsonNode body = invoke(batch.toString(), 413);
+
+        assertThat(body.get("error").get("code").asText()).isEqualTo("PAYLOAD_TOO_LARGE");
+        assertThat(s3().listObjectsV2(ListObjectsV2Request.builder().bucket(bucket()).build()).contents())
+                .isEmpty();
+        assertThat(tableIsEmpty()).isTrue();
     }
 
     @Test
@@ -143,5 +181,12 @@ class IngestHandlerIT extends LocalStackBase {
                             "SK", AttributeValue.builder().s(sk).build()))
                 .consistentRead(true)
                 .build()).item();
+    }
+
+    private boolean tableIsEmpty() {
+        return ddb().scan(ScanRequest.builder()
+                .tableName(table())
+                .limit(1)
+                .build()).items().isEmpty();
     }
 }

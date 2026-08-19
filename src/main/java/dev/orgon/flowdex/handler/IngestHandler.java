@@ -60,7 +60,7 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
-        String requestId = context.getAwsRequestId();
+        String requestId = context.getAwsRequestId() == null ? "" : context.getAwsRequestId();
         try {
             return Responses.ok(202, ingest(event, requestId), requestId);
         } catch (ApiException e) {
