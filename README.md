@@ -88,6 +88,13 @@ range query exclusive without a sentinel character: a record at exactly
 
 ## Ingest and idempotency
 
+`POST /ingest` accepts a gzip-compressed body, but only when the request
+carries `content-type: application/gzip` — API Gateway REST decides whether
+to treat a body as binary by `Content-Type`, not `Content-Encoding`, and
+`infra/api.tf` lists `application/gzip` in `binary_media_types` for exactly
+that reason. A gzipped body sent with any other content type is handed to
+the function un-decoded and fails to parse.
+
 Per connection record, per endpoint, one `TransactWriteItems` containing a
 conditional `Put` of the index row and an `Update` of that hour's rollup.
 Re-POSTing the same file fails every condition, aborts every transaction,
@@ -243,8 +250,10 @@ exactly what silent truncation costs.
 Gateway's 29-second integration ceiling at the 5 MB body cap — roughly
 34,000 transactions at 8–12ms each is minutes, not seconds. `IngestHandler`
 indexes records on a fixed 32-thread pool (`WRITE_CONCURRENCY`), sized for
-an I/O-bound workload on a 1 vCPU function, which brings a full batch
-inside the limit. `MAX_RECORDS = 20_000` makes the resulting boundary
+an I/O-bound workload — the threads spend their time waiting on DynamoDB,
+not computing, so pool size is not bound by the function's 1024 MB
+(roughly 0.58 vCPU) allocation — which brings a full batch inside the
+limit. `MAX_RECORDS = 20_000` makes the resulting boundary
 something the caller reads in an error message rather than discovers by
 timeout.
 
@@ -261,10 +270,10 @@ produce.
 
 **Pagination cursors are bound to their partition.** The cursor returned by
 `GET /connections` encodes DynamoDB's `LastEvaluatedKey`, which includes
-`PK`. `ConnectionsHandler` checks the decoded `PK` against the `ip` being
-queried before using it, so a cursor minted while paging one address can't
-be replayed against another — it fails instead of silently paging through
-the wrong partition.
+`PK`. `CursorCodec.decode`, invoked via `IndexStore.queryConnections`, checks
+the decoded `PK` against the `ip` being queried before using it, so a cursor
+minted while paging one address can't be replayed against another — it fails
+instead of silently paging through the wrong partition.
 
 **Response numeric types are chosen per field, not per value.** Ports,
 byte counts, and line numbers are always serialised as JSON integers;
@@ -280,6 +289,12 @@ permissions on the operations it contains. A transaction of one
 conditional `Put` and one `Update` needs exactly `dynamodb:PutItem` and
 `dynamodb:UpdateItem` (plus `dynamodb:Query` for the read handlers); the
 Lambda role in `infra/lambda.tf` is scoped to exactly those, nothing wider.
+
+**Raw S3 objects are write-only through the API.** The Lambda role holds
+`s3:PutObject` only — no `s3:GetObject`. Each index row names the exact
+`s3Key` and `s3Line` it came from, but redeeming that provenance means
+reading the object with your own AWS credentials outside the API, not
+through any flowdex endpoint.
 
 **Local Terraform state.** State stays local and gitignored. Remote state
 with a lock table is the right call for a team, and unjustified
@@ -336,6 +351,10 @@ Knowing the ceiling matters more than raising it:
 - **Retrieval only.** Aggregations beyond per-IP hourly counters — top
   talkers across a whole subnet, arbitrary field search — want Athena over
   the S3 objects or OpenSearch, not DynamoDB.
+- **Unbounded rollup queries.** `IndexStore.queryRollups` pages until it runs
+  out of rollup rows, with no page budget like the peer scan's explicit
+  5-page cap and no maximum query window enforced anywhere. A `from`/`to`
+  spanning years pages until the request simply times out.
 
 ## Build and test
 

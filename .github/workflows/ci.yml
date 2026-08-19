@@ -22,10 +22,7 @@ jobs:
           java-version: '21'
           cache: maven
 
-      - name: Unit tests
-        run: mvn -B test
-
-      - name: Integration tests (LocalStack via Testcontainers)
+      - name: Unit and integration tests
         run: mvn -B verify
 
       - name: Upload handler jar
