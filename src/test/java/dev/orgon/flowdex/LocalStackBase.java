@@ -10,11 +10,9 @@ import software.amazon.awssdk.services.dynamodb.model.*;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 
-import java.net.URI;
-
 /**
  * One LocalStack container for the whole run, started lazily and torn down by
- * the JVM shutdown hook Testcontainers installs. Each test class gets a fresh
+ * the JVM shutdown hook Testcontainers installs. Each test method gets a fresh
  * table and bucket so tests cannot leak state into one another.
  */
 public abstract class LocalStackBase {
@@ -25,6 +23,9 @@ public abstract class LocalStackBase {
 
     private static S3Client s3;
     private static DynamoDbClient ddb;
+
+    private static final java.util.concurrent.atomic.AtomicInteger RESOURCE_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     private String bucket;
     private String table;
@@ -47,8 +48,8 @@ public abstract class LocalStackBase {
     }
 
     @org.junit.jupiter.api.BeforeEach
-    void provisionResources(org.junit.jupiter.api.TestInfo info) {
-        String suffix = Integer.toHexString(System.identityHashCode(this)) + "-" + Math.abs(info.getDisplayName().hashCode());
+    void provisionResources() {
+        String suffix = Integer.toString(RESOURCE_SEQ.incrementAndGet());
         bucket = "flowdex-test-" + suffix;
         table = "flowdex-test-" + suffix;
 

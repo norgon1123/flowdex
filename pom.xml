@@ -112,11 +112,17 @@
         <artifactId>maven-failsafe-plugin</artifactId>
         <version>3.5.2</version>
         <configuration>
-          <!-- The bundled docker-java client in Testcontainers 1.20.6 defaults to
-               Docker API 1.32, which this host's Docker daemon (29.7.2, min API 1.40)
-               rejects. Pin a compatible API version for the forked test JVM. -->
+          <!--
+            Testcontainers 1.20.6's bundled docker-java defaults to Docker API
+            1.32, below the 1.40 minimum modern daemons accept, so the client
+            must be told to ask for something newer. 1.40 is deliberately the
+            floor rather than a current value: it is the lowest this host
+            accepts, and pinning higher would exclude the older daemons on CI
+            runners. There is no environment variable for this in docker-java,
+            and failsafe forks its own JVM, so it has to be set here.
+          -->
           <systemPropertyVariables>
-            <api.version>1.51</api.version>
+            <api.version>1.40</api.version>
           </systemPropertyVariables>
         </configuration>
         <executions>
