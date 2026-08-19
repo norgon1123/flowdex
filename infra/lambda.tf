@@ -23,17 +23,21 @@ resource "aws_iam_role" "lambda" {
 
 # Scoped to exactly the one table and the one bucket, and no further.
 data "aws_iam_policy_document" "lambda" {
+  # Writes go through TransactWriteItems, which has no IAM action of its own:
+  # transactions are authorised by the underlying item operations, so a conditional
+  # Put plus a rollup Update needs exactly PutItem and UpdateItem. Only a
+  # ConditionCheck transact item would additionally need dynamodb:ConditionCheckItem,
+  # and this transaction does not use one.
   statement {
     actions = [
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
-      "dynamodb:GetItem",
       "dynamodb:Query",
     ]
     resources = [aws_dynamodb_table.index.arn]
   }
   statement {
-    actions   = ["s3:PutObject", "s3:GetObject"]
+    actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.raw.arn}/*"]
   }
   statement {
@@ -80,7 +84,7 @@ resource "aws_lambda_function" "fn" {
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.lambda]
+  depends_on = [aws_cloudwatch_log_group.lambda, aws_iam_role_policy.lambda]
 }
 
 resource "aws_lambda_alias" "live" {
