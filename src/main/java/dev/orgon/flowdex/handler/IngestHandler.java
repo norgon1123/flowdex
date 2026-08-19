@@ -22,10 +22,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 
 /**
  * POST /ingest.
@@ -41,15 +44,37 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
     /**
      * Sequential per-record transactions cannot fit API Gateway's 29-second
      * integration timeout at 5 MB, so transactions are dispatched across a
-     * pool. 32 is chosen for an I/O-bound workload on a function sized at 1024
-     * MB memory (roughly 0.58 vCPU; Lambda reaches 1 vCPU at 1769 MB): the
+     * pool. 32 is chosen for an I/O-bound workload on a function sized at 2048
+     * MB memory (roughly 1.15 vCPU; Lambda reaches 1 vCPU at 1769 MB): the
      * threads spend their time waiting on DynamoDB, not computing, so pool
      * size is not bound by core count.
+     *
+     * The unit of parallelism is a PARTITION, not a record — see shardByPartition.
      */
     public static final int WRITE_CONCURRENCY = 32;
 
-    /** The documented ceiling that keeps the pool inside the gateway timeout. */
-    public static final int MAX_RECORDS = 20_000;
+    /**
+     * The documented ceiling that keeps the pool inside the gateway timeout.
+     *
+     * 5,000 records is roughly 10,000 transactions (two endpoints each) and
+     * ~40,000 WCU. Three ceilings set this number, and the smallest wins:
+     *
+     *  - A brand-new on-demand table serves about 4,000 WCU/s before it has
+     *    doubled its way up from a cold start, so 40,000 WCU is ~10 s on the
+     *    very first ingest into a fresh stack — the README's own demo path.
+     *  - A single DynamoDB partition caps near 1,000 WCU/s in every billing
+     *    mode, and adaptive capacity cannot split one partition key. At 4 WCU
+     *    per transaction that is ~250 transactions/s for one address.
+     *  - The gateway gives up at 29 s regardless.
+     *
+     * A mixed-traffic batch spreads across many partitions and lands in
+     * seconds. A scan-shaped batch — one scanner against 5,000 targets — is
+     * pinned to the scanner's single partition and can exceed 29 s. That is a
+     * real 504, not a theoretical one, and it is safe: the function runs on
+     * past the gateway (see the Terraform timeout) and finishes, so the
+     * client's retry reports duplicates rather than redoing the work.
+     */
+    public static final int MAX_RECORDS = 5_000;
 
     private final ConnLogParser parser = new ConnLogParser();
     private final IndexStore index;
@@ -66,9 +91,9 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
-        String requestId = context.getAwsRequestId() == null ? "" : context.getAwsRequestId();
+        String requestId = RequestId.of(event, context);
         try {
-            return Responses.ok(202, ingest(event, requestId), requestId);
+            return Responses.ok(202, ingest(event, requestId, context::getRemainingTimeInMillis), requestId);
         } catch (ApiException e) {
             Log.event("ingest.rejected", Map.of("requestId", requestId, "code", e.code(), "status", e.status()));
             return Responses.error(e, requestId);
@@ -90,7 +115,8 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
         }
     }
 
-    private Map<String, Object> ingest(APIGatewayProxyRequestEvent event, String requestId) {
+    private Map<String, Object> ingest(APIGatewayProxyRequestEvent event, String requestId,
+                                       IndexStore.RetryBudget budget) {
         byte[] body = Body.decode(event, MAX_BODY_BYTES);
         ParseResult parsed = parser.parse(new String(body, StandardCharsets.UTF_8));
         parser.enforceMalformedThreshold(parsed);
@@ -104,27 +130,13 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
         Instant now = Instant.now();
         String s3Key = raw.putBatch(ingestId, now, body);
 
+        AtomicIntegerArray written = writeAll(parsed.records(), s3Key, budget);
+
         int indexed = 0;
-        int duplicates = 0;
-        ExecutorService pool = Executors.newFixedThreadPool(WRITE_CONCURRENCY);
-        try {
-            List<Callable<TxnOutcome>> tasks = new ArrayList<>(parsed.records().size());
-            for (ConnRecord record : parsed.records()) {
-                tasks.add(() -> writeRecord(record, s3Key));
-            }
-            for (Future<TxnOutcome> future : pool.invokeAll(tasks)) {
-                if (get(future) == TxnOutcome.WRITTEN) {
-                    indexed++;
-                } else {
-                    duplicates++;
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted during ingest", e);
-        } finally {
-            pool.shutdownNow();
+        for (int i = 0; i < written.length(); i++) {
+            indexed += written.get(i);
         }
+        int duplicates = parsed.records().size() - indexed;
 
         Log.event("ingest.completed", Map.of(
                 "requestId", requestId, "ingestId", ingestId,
@@ -143,34 +155,106 @@ public class IngestHandler implements RequestHandler<APIGatewayProxyRequestEvent
         return response;
     }
 
+    /** One row of the batch, kept with the index of the record it came from. */
+    private record PendingRow(int record, IndexRow row) {}
+
     /**
-     * A record is indexed when at least one of its endpoint rows was newly
-     * written, and a duplicate when every one of them already existed. Both
-     * rows of a record are written on the same thread so the two outcomes
-     * cannot interleave.
+     * Every row of one partition is owned by one worker.
+     *
+     * The obvious sharding — one task per record — is wrong here. Each record
+     * bumps its endpoints' hourly rollup items, so a file about one busy
+     * address has every worker contending on the same rollup item, and the
+     * transactions cancel each other with TransactionConflict faster than any
+     * retry ladder can absorb. Partitioning the work by partition key removes
+     * the contention rather than backing off from it: two workers never touch
+     * the same rollup, so the retry path returns to being the rare case it was
+     * always assumed to be. Cross-address parallelism, which is where the real
+     * throughput is, is untouched.
+     *
+     * The cost is that one address is written serially, which is the honest
+     * shape of the underlying limit — a single partition caps near 1,000 WCU/s
+     * no matter how many threads shout at it.
      */
-    private TxnOutcome writeRecord(ConnRecord record, String s3Key) {
-        TxnOutcome outcome = TxnOutcome.DUPLICATE;
-        for (String addr : IndexRow.endpointsOf(record)) {
-            if (index.writeRow(IndexRow.forSide(record, addr, s3Key)) == TxnOutcome.WRITTEN) {
-                outcome = TxnOutcome.WRITTEN;
+    private static Map<String, List<PendingRow>> shardByPartition(List<ConnRecord> records, String s3Key) {
+        Map<String, List<PendingRow>> shards = new LinkedHashMap<>();
+        for (int i = 0; i < records.size(); i++) {
+            ConnRecord record = records.get(i);
+            for (String addr : IndexRow.endpointsOf(record)) {
+                IndexRow row = IndexRow.forSide(record, addr, s3Key);
+                shards.computeIfAbsent(row.pk(), k -> new ArrayList<>()).add(new PendingRow(i, row));
             }
         }
-        return outcome;
+        return shards;
     }
 
-    private static TxnOutcome get(Future<TxnOutcome> future) {
-        try {
-            return future.get();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted during ingest", e);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof RuntimeException re) {
-                throw re;
-            }
-            throw new IllegalStateException("index write failed", cause);
+    /**
+     * Returns 1 per record that was newly written, 0 per record that was
+     * already present in full.
+     *
+     * A record is indexed when at least one of its endpoint rows was newly
+     * written, and a duplicate when every one of them already existed. Its two
+     * rows now live in different shards and so are written by different
+     * threads, which is why the flag is an atomic set-to-one rather than a
+     * plain assignment: both threads may reach the same slot, and both agree
+     * on the value.
+     */
+    private AtomicIntegerArray writeAll(List<ConnRecord> records, String s3Key, IndexStore.RetryBudget budget) {
+        AtomicIntegerArray written = new AtomicIntegerArray(records.size());
+        Map<String, List<PendingRow>> shards = shardByPartition(records, s3Key);
+        if (shards.isEmpty()) {
+            return written;
         }
+
+        AtomicBoolean aborted = new AtomicBoolean();
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(WRITE_CONCURRENCY, shards.size()));
+        try {
+            CompletionService<Void> completions = new ExecutorCompletionService<>(pool);
+            for (List<PendingRow> shard : shards.values()) {
+                completions.submit(shardWriter(shard, budget, aborted, written));
+            }
+
+            for (int done = 0; done < shards.size(); done++) {
+                try {
+                    completions.take().get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted during ingest", e);
+                } catch (ExecutionException e) {
+                    // Fail fast. Waiting for the remaining shards after a
+                    // deterministic failure — a missing IAM grant, say — spends
+                    // the entire gateway budget on work that cannot succeed and
+                    // turns a diagnosable 5xx into a bare timeout.
+                    aborted.set(true);
+                    throw asRuntime(e.getCause());
+                }
+            }
+        } finally {
+            aborted.set(true);
+            pool.shutdownNow();
+        }
+        return written;
     }
+
+    private Callable<Void> shardWriter(List<PendingRow> shard, IndexStore.RetryBudget budget,
+                                       AtomicBoolean aborted, AtomicIntegerArray written) {
+        return () -> {
+            for (PendingRow pending : shard) {
+                if (aborted.get()) {
+                    return null;
+                }
+                if (index.writeRow(pending.row(), budget) == TxnOutcome.WRITTEN) {
+                    written.set(pending.record(), 1);
+                }
+            }
+            return null;
+        };
+    }
+
+    private static RuntimeException asRuntime(Throwable cause) {
+        if (cause instanceof RuntimeException re) {
+            return re;
+        }
+        return new IllegalStateException("index write failed", cause);
+    }
+
 }

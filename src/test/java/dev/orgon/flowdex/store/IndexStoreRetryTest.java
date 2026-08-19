@@ -110,6 +110,55 @@ class IndexStoreRetryTest {
         assertThat(fake.invocations()).isEqualTo(1);
     }
 
+    /**
+     * The retry has to be budgeted against the caller's deadline, not against a
+     * fixed ladder. Sleeping past the moment an answer was still useful converts
+     * a 503 the client can act on into a bare gateway timeout, which says less.
+     */
+    @Test
+    void aNearlyExhaustedBudgetStopsRetryingImmediately() {
+        FakeDdb fake = new FakeDdb(List.of(
+                () -> { throw cancelledWith("None", "TransactionConflict"); }));
+        IndexStore store = new IndexStore(fake, "table");
+
+        assertThatThrownBy(() -> store.writeRow(ROW, () -> IndexStore.RETRY_RESERVE_MILLIS - 1))
+                .isInstanceOf(TransactionCanceledException.class);
+        assertThat(fake.invocations()).isEqualTo(1);
+    }
+
+    @Test
+    void anAmpleBudgetRetriesNormally() {
+        FakeDdb fake = new FakeDdb(List.of(
+                () -> { throw cancelledWith("None", "TransactionConflict"); },
+                () -> TransactWriteItemsResponse.builder().build()));
+        IndexStore store = new IndexStore(fake, "table");
+
+        assertThat(store.writeRow(ROW, () -> 30_000L)).isEqualTo(TxnOutcome.WRITTEN);
+        assertThat(fake.invocations()).isEqualTo(2);
+    }
+
+    /**
+     * Full jitter, not a deterministic ladder. Every writer that collides on one
+     * rollup item collides at the same instant, so a shared ladder wakes them all
+     * together and they collide again — the backoff re-synchronises the very
+     * contention it is meant to spread. Sampling the observed sleeps proves the
+     * draw is random and stays inside the ceiling.
+     */
+    @Test
+    void backoffIsJitteredRatherThanAFixedLadder() {
+        java.util.Set<Long> observed = new java.util.HashSet<>();
+        for (int run = 0; run < 40; run++) {
+            FakeDdb fake = new FakeDdb(List.of(
+                    () -> { throw cancelledWith("None", "TransactionConflict"); },
+                    () -> TransactWriteItemsResponse.builder().build()));
+            long before = System.nanoTime();
+            new IndexStore(fake, "table").writeRow(ROW);
+            observed.add((System.nanoTime() - before) / 1_000_000);
+        }
+        assertThat(observed).as("a fixed ladder would sleep the same 20 ms every time").hasSizeGreaterThan(1);
+        assertThat(observed).allSatisfy(millis -> assertThat(millis).isLessThan(200L));
+    }
+
     private static TransactionCanceledException cancelledWith(String... reasonCodes) {
         return TransactionCanceledException.builder()
                 .message("Transaction cancelled, please refer cancellation reasons for specific reasons")

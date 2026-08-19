@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * All DynamoDB access. One TransactWriteItems per row pairs a conditional Put
@@ -18,8 +19,31 @@ import java.util.Optional;
  */
 public class IndexStore {
 
-    private static final int MAX_ATTEMPTS = 6;
+    private static final int MAX_ATTEMPTS = 8;
     private static final long BASE_BACKOFF_MILLIS = 20;
+    private static final long MAX_BACKOFF_MILLIS = 800;
+
+    /**
+     * Retrying is only worth doing while there is still time to answer. Below
+     * this much remaining budget the retry stops and the failure surfaces, so
+     * the caller gets a 503 it can act on instead of a gateway timeout.
+     */
+    static final long RETRY_RESERVE_MILLIS = 1_500;
+
+    /**
+     * How much time the caller has left. The ingest handler supplies Lambda's
+     * own countdown; everything else retries on the attempt ladder alone.
+     *
+     * A fixed ladder is the wrong shape for a retry that runs inside a request
+     * with a deadline: it either gives up while there was time left, or sleeps
+     * past the moment an answer was still useful.
+     */
+    @FunctionalInterface
+    public interface RetryBudget {
+        long remainingMillis();
+
+        RetryBudget UNLIMITED = () -> Long.MAX_VALUE;
+    }
 
     private final DynamoDbClient ddb;
     private final String table;
@@ -30,6 +54,10 @@ public class IndexStore {
     }
 
     public TxnOutcome writeRow(IndexRow row) {
+        return writeRow(row, RetryBudget.UNLIMITED);
+    }
+
+    public TxnOutcome writeRow(IndexRow row, RetryBudget budget) {
         TransactWriteItemsRequest request = TransactWriteItemsRequest.builder()
                 .transactItems(putIndexRow(row), bumpRollup(row))
                 .build();
@@ -45,13 +73,13 @@ public class IndexStore {
                 if (attempt >= MAX_ATTEMPTS || !isRetryable(e)) {
                     throw e;
                 }
-                backoff(attempt);
+                backoff(attempt, budget, e);
             } catch (ProvisionedThroughputExceededException | RequestLimitExceededException
                      | InternalServerErrorException e) {
                 if (attempt >= MAX_ATTEMPTS) {
                     throw e;
                 }
-                backoff(attempt);
+                backoff(attempt, budget, e);
             }
         }
     }
@@ -112,10 +140,28 @@ public class IndexStore {
             || hasReason(e, "ProvisionedThroughputExceeded");
     }
 
-    private static void backoff(int attempt) {
-        long millis = BASE_BACKOFF_MILLIS * (1L << (attempt - 1));
+    /**
+     * Full jitter: sleep a uniform random draw from [0, ceiling), not the
+     * ceiling itself.
+     *
+     * A deterministic ladder is actively harmful here. Every writer that
+     * collides on one rollup item collides at the same instant, so a shared
+     * ladder makes them all wake at the same instant and collide again — the
+     * contention is re-synchronised by the very mechanism meant to spread it.
+     * Randomising the whole interval is what actually spreads them out.
+     *
+     * Giving up early when the budget is nearly spent is the other half: a
+     * sleep that outlasts the request converts a reportable 503 into a
+     * timeout, which tells the caller strictly less.
+     */
+    private static void backoff(int attempt, RetryBudget budget, RuntimeException cause) {
+        long ceiling = Math.min(MAX_BACKOFF_MILLIS, BASE_BACKOFF_MILLIS * (1L << (attempt - 1)));
+        long millis = ThreadLocalRandom.current().nextLong(ceiling + 1);
+        if (budget.remainingMillis() - millis < RETRY_RESERVE_MILLIS) {
+            throw cause;
+        }
         try {
-            Thread.sleep(Math.min(millis, 800));
+            Thread.sleep(millis);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted while retrying", ie);
@@ -141,29 +187,32 @@ public class IndexStore {
      */
     public Page queryConnections(String addr, Instant from, Instant to, int limit, String cursor) {
         String pk = Keys.pk(addr);
+        String fromBound = Keys.connBound(from);
+        String toBound = Keys.connBound(to);
         boolean cursorSupplied = cursor != null && !cursor.isBlank();
         QueryRequest.Builder request = QueryRequest.builder()
                 .tableName(table)
                 .keyConditionExpression("PK = :pk AND SK BETWEEN :from AND :to")
                 .expressionAttributeValues(Map.of(
                         ":pk", av(pk),
-                        ":from", av(Keys.connBound(from)),
-                        ":to", av(Keys.connBound(to))))
+                        ":from", av(fromBound),
+                        ":to", av(toBound)))
                 .limit(limit);
         if (cursorSupplied) {
-            request.exclusiveStartKey(CursorCodec.decode(cursor, pk));
+            request.exclusiveStartKey(CursorCodec.decode(cursor, pk, fromBound, toBound));
         }
 
         QueryResponse response;
         try {
             response = ddb.query(request.build());
         } catch (DynamoDbException e) {
-            // CursorCodec.decode only validates the cursor's PK. If the caller
-            // narrows from/to while holding a cursor whose SK falls outside the
-            // new range, DynamoDB itself rejects ExclusiveStartKey with this
-            // message — a client mistake, not a server failure. Only translate
-            // it when a cursor was actually supplied, so a genuine service error
-            // on an un-cursored query still surfaces as 500.
+            // Backstop. CursorCodec.decode already rejects every start-key shape
+            // this codebase knows how to produce badly, but it is validating a
+            // caller-supplied token against rules DynamoDB owns, so anything it
+            // has not anticipated should still read as a client mistake rather
+            // than a server failure. Only translated when a cursor was actually
+            // supplied, so a genuine service error on an un-cursored query still
+            // surfaces as 500.
             if (cursorSupplied && startKeyMismatch(e)) {
                 throw ApiException.badRequest("INVALID_CURSOR", "cursor does not belong to this time range");
             }
