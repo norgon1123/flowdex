@@ -111,6 +111,14 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-failsafe-plugin</artifactId>
         <version>3.5.2</version>
+        <configuration>
+          <!-- The bundled docker-java client in Testcontainers 1.20.6 defaults to
+               Docker API 1.32, which this host's Docker daemon (29.7.2, min API 1.40)
+               rejects. Pin a compatible API version for the forked test JVM. -->
+          <systemPropertyVariables>
+            <api.version>1.51</api.version>
+          </systemPropertyVariables>
+        </configuration>
         <executions>
           <execution>
             <goals><goal>integration-test</goal><goal>verify</goal></goals>
