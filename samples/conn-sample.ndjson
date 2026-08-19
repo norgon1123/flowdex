@@ -1,0 +1,5 @@
+{"ts":1787061802.451,"uid":"CHhAvV","id.orig_h":"10.0.0.5","id.orig_p":54321,"id.resp_h":"10.0.0.9","id.resp_p":443,"proto":"tcp","service":"ssl","duration":1.25,"orig_bytes":512,"resp_bytes":8192,"conn_state":"SF"}
+{"ts":1787062021.002,"uid":"CmES5u","id.orig_h":"10.0.0.9","id.orig_p":80,"id.resp_h":"10.0.0.5","id.resp_p":51000,"proto":"tcp","service":"http","duration":0.5,"orig_bytes":1024,"resp_bytes":256,"conn_state":"SF"}
+{"ts":1787066560.318,"uid":"C4J4Th","id.orig_h":"10.0.0.5","id.orig_p":33445,"id.resp_h":"8.8.8.8","id.resp_p":53,"proto":"udp","duration":0.01,"orig_bytes":64,"resp_bytes":128}
+{"ts":1787066600.000,"uid":"CloopA","id.orig_h":"127.0.0.1","id.orig_p":40000,"id.resp_h":"127.0.0.1","id.resp_p":8080,"proto":"tcp","service":"http","orig_bytes":10,"resp_bytes":20,"conn_state":"SF"}
+{"ts":1787066700.500,"uid":"CotherX","id.orig_h":"192.168.1.2","id.orig_p":1234,"id.resp_h":"192.168.1.3","id.resp_p":22,"proto":"tcp","service":"ssh","duration":30.0,"orig_bytes":2048,"resp_bytes":4096,"conn_state":"SF"}

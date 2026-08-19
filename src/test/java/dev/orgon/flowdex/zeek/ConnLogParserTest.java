@@ -1,0 +1,125 @@
+package dev.orgon.flowdex.zeek;
+
+import dev.orgon.flowdex.api.ApiException;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class ConnLogParserTest {
+
+    private static final String GOOD =
+        "{\"ts\":1787061802.451,\"uid\":\"CHhAvV\",\"id.orig_h\":\"10.0.0.5\",\"id.orig_p\":54321,"
+      + "\"id.resp_h\":\"10.0.0.9\",\"id.resp_p\":443,\"proto\":\"tcp\",\"service\":\"ssl\","
+      + "\"duration\":1.25,\"orig_bytes\":512,\"resp_bytes\":8192,\"conn_state\":\"SF\"}";
+
+    private final ConnLogParser parser = new ConnLogParser();
+
+    @Test
+    void parsesAllFieldsOfAGoodLine() {
+        ConnRecord r = parser.parse(GOOD).records().getFirst();
+        assertThat(r.uid()).isEqualTo("CHhAvV");
+        assertThat(r.origH()).isEqualTo("10.0.0.5");
+        assertThat(r.origP()).isEqualTo(54321);
+        assertThat(r.respH()).isEqualTo("10.0.0.9");
+        assertThat(r.respP()).isEqualTo(443);
+        assertThat(r.proto()).isEqualTo("tcp");
+        assertThat(r.service()).isEqualTo("ssl");
+        assertThat(r.duration()).isEqualTo(1.25);
+        assertThat(r.origBytes()).isEqualTo(512L);
+        assertThat(r.respBytes()).isEqualTo(8192L);
+        assertThat(r.connState()).isEqualTo("SF");
+        assertThat(r.line()).isEqualTo(1);
+    }
+
+    @Test
+    void convertsEpochSecondsToMillisecondPreciseInstant() {
+        ConnRecord r = parser.parse(GOOD).records().getFirst();
+        assertThat(r.ts()).isEqualTo(Instant.ofEpochMilli(1787061802451L));
+    }
+
+    @Test
+    void absentOptionalNumericsDefaultToZeroAndStringsToNull() {
+        String line = "{\"ts\":1.0,\"uid\":\"U\",\"id.orig_h\":\"1.1.1.1\",\"id.orig_p\":1,"
+                    + "\"id.resp_h\":\"2.2.2.2\",\"id.resp_p\":2,\"proto\":\"udp\"}";
+        ConnRecord r = parser.parse(line).records().getFirst();
+        assertThat(r.duration()).isZero();
+        assertThat(r.origBytes()).isZero();
+        assertThat(r.respBytes()).isZero();
+        assertThat(r.service()).isNull();
+        assertThat(r.connState()).isNull();
+    }
+
+    @Test
+    void zeekDashPlaceholdersAreTreatedAsAbsent() {
+        String line = "{\"ts\":1.0,\"uid\":\"U\",\"id.orig_h\":\"1.1.1.1\",\"id.orig_p\":1,"
+                    + "\"id.resp_h\":\"2.2.2.2\",\"id.resp_p\":2,\"proto\":\"udp\","
+                    + "\"service\":\"-\",\"duration\":\"-\",\"orig_bytes\":\"-\"}";
+        ConnRecord r = parser.parse(line).records().getFirst();
+        assertThat(r.service()).isNull();
+        assertThat(r.duration()).isZero();
+        assertThat(r.origBytes()).isZero();
+    }
+
+    @Test
+    void missingRequiredFieldIsMalformedWithLineNumberAndReason() {
+        String line = "{\"ts\":1.0,\"uid\":\"U\",\"id.orig_h\":\"1.1.1.1\",\"id.orig_p\":1,"
+                    + "\"id.resp_p\":2,\"proto\":\"tcp\"}";
+        ParseResult result = parser.parse(GOOD + "\n" + line);
+        assertThat(result.records()).hasSize(1);
+        assertThat(result.malformed()).singleElement()
+            .satisfies(m -> {
+                assertThat(m.line()).isEqualTo(2);
+                assertThat(m.reason()).isEqualTo("missing id.resp_h");
+            });
+    }
+
+    @Test
+    void unparseableJsonIsMalformedNotFatal() {
+        ParseResult result = parser.parse("not json at all\n" + GOOD);
+        assertThat(result.records()).hasSize(1);
+        assertThat(result.malformed().getFirst().line()).isEqualTo(1);
+        assertThat(result.malformed().getFirst().reason()).isEqualTo("not valid JSON");
+    }
+
+    @Test
+    void blankLinesAreSkippedEntirelyAndDoNotCountAsReceived() {
+        ParseResult result = parser.parse(GOOD + "\n\n   \n");
+        assertThat(result.received()).isEqualTo(1);
+        assertThat(result.malformed()).isEmpty();
+    }
+
+    @Test
+    void thresholdAcceptsNinePercent() {
+        ParseResult r = new ParseResult(java.util.List.of(), nMalformed(9), 100);
+        parser.enforceMalformedThreshold(r); // must not throw
+    }
+
+    @Test
+    void thresholdAcceptsExactlyTenPercent() {
+        ParseResult r = new ParseResult(java.util.List.of(), nMalformed(10), 100);
+        parser.enforceMalformedThreshold(r); // "more than 10%" — 10% passes
+    }
+
+    @Test
+    void thresholdRejectsElevenPercent() {
+        ParseResult r = new ParseResult(java.util.List.of(), nMalformed(11), 100);
+        assertThatThrownBy(() -> parser.enforceMalformedThreshold(r))
+            .isInstanceOf(ApiException.class)
+            .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("MALFORMED_BATCH"));
+    }
+
+    @Test
+    void emptyBatchIsRejected() {
+        assertThatThrownBy(() -> parser.enforceMalformedThreshold(parser.parse("")))
+            .isInstanceOf(ApiException.class)
+            .satisfies(e -> assertThat(((ApiException) e).code()).isEqualTo("EMPTY_BATCH"));
+    }
+
+    private static java.util.List<MalformedLine> nMalformed(int n) {
+        return java.util.stream.IntStream.rangeClosed(1, n)
+            .mapToObj(i -> new MalformedLine(i, "r")).toList();
+    }
+}
